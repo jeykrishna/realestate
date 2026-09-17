@@ -1,0 +1,18 @@
+# env files
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# virtual environments
+.venv/
+venv/
+
+# local Claude Code settings
+/.claude/settings.local.json
