@@ -16,3 +16,6 @@ venv/
 
 # local Claude Code settings
 /.claude/settings.local.json
+
+# Redis dump file
+dump.rdb

@@ -27,7 +27,7 @@ def _verify_image_bytes(content: bytes) -> None:
 @router.post("/upload", response_model=MediaUploadResponse)
 async def upload_media(
     file: UploadFile = File(...),
-    type: str = Form(..., description="hero | gallery | city"),
+    type: str = Form(..., description="hero | gallery | city | viewpoint360"),
     property_id: str = Form(None),
     _: object = Depends(require_admin),
 ):

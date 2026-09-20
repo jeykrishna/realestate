@@ -42,13 +42,32 @@ def _plot_to_out(p: Plot) -> PlotOut:
     )
 
 
+def _normalize_viewpoints(raw: dict | None) -> dict:
+    """Coerce stored viewpoints into {id: {url, label, desc}} form.
+    Handles legacy rows saved back when viewpoints were plain {id: url} strings."""
+    normalized = {}
+    for vid, entry in (raw or {}).items():
+        if isinstance(entry, str):
+            normalized[vid] = {"url": entry, "label": "", "desc": ""}
+        elif isinstance(entry, dict):
+            normalized[vid] = {
+                "url": entry.get("url", ""),
+                "label": entry.get("label", ""),
+                "desc": entry.get("desc", ""),
+            }
+    return normalized
+
+
 def _config_to_layout(config: PlotConfig) -> LayoutConfig:
+    viewpoints = _normalize_viewpoints(config.viewpoints)
+
     if config.layout_type == "image":
         return LayoutConfig(
             type="image",
             image_url=config.image_url,
             img_width=config.img_width,
             img_height=config.img_height,
+            viewpoints=viewpoints,
         )
 
     roads = []
@@ -61,7 +80,7 @@ def _config_to_layout(config: PlotConfig) -> LayoutConfig:
                 start_cell=r.get("startCell", r.get("start_cell", 1)),
                 end_cell=r.get("endCell", r.get("end_cell", 1)),
             ))
-    return LayoutConfig(type="grid", rows=config.rows, cols=config.cols, roads=roads)
+    return LayoutConfig(type="grid", rows=config.rows, cols=config.cols, roads=roads, viewpoints=viewpoints)
 
 
 def _auto_hide_property(db: Session, property_id: str):
@@ -178,6 +197,7 @@ def save_layout(
     db.commit()
 
     layout = payload.layout_config
+    viewpoints_data = {vid: v.model_dump() for vid, v in (layout.viewpoints or {}).items()}
 
     if layout.type == "image":
         config = PlotConfig(
@@ -190,6 +210,7 @@ def save_layout(
             image_url=layout.image_url,
             img_width=layout.img_width,
             img_height=layout.img_height,
+            viewpoints=viewpoints_data,
         )
     else:
         roads_data = [
@@ -209,6 +230,7 @@ def save_layout(
             rows=layout.rows,
             cols=layout.cols,
             roads=roads_data,
+            viewpoints=viewpoints_data,
         )
     db.add(config)
 
@@ -273,5 +295,6 @@ def get_plot_config(property_id: str, db: Session = Depends(get_db)):
             image_url=config.image_url,
             img_width=config.img_width,
             img_height=config.img_height,
+            viewpoints=_normalize_viewpoints(config.viewpoints),
         )
     )

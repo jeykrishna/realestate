@@ -16,6 +16,8 @@ class PlotConfig(Base):
     image_url = Column(String, nullable=True)
     img_width = Column(Integer, nullable=True)
     img_height = Column(Integer, nullable=True)
+    # 360° walkthrough images, keyed by viewpoint id (entrance/front-road/interior/boundary)
+    viewpoints = Column(JSON, default={})
 
     property = relationship(
         "Property", back_populates="plot_config",

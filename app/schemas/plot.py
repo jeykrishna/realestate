@@ -17,6 +17,14 @@ class RoadConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ViewpointData(BaseModel):
+    """A single 360° walkthrough viewpoint — an uploaded photo with admin-editable
+    label/description text (defaults come from the frontend's VIEWPOINT_META)."""
+    url: str
+    label: str = ""
+    desc: str = ""
+
+
 class LayoutConfig(BaseModel):
     """Plot layout config — either a grid "seat map" or an SVG-polygon "image map"."""
     model_config = ConfigDict(populate_by_name=True)
@@ -32,6 +40,9 @@ class LayoutConfig(BaseModel):
     image_url: Optional[str] = Field(default=None, alias="imageUrl")
     img_width: Optional[int] = Field(default=None, alias="imgWidth")
     img_height: Optional[int] = Field(default=None, alias="imgHeight")
+
+    # 360° walkthrough images, keyed by viewpoint id — independent of layout type
+    viewpoints: dict[str, ViewpointData] = {}
 
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
@@ -94,6 +105,7 @@ class PlotConfigOut(BaseModel):
     image_url: Optional[str] = None
     img_width: Optional[int] = None
     img_height: Optional[int] = None
+    viewpoints: dict[str, ViewpointData] = {}
 
     model_config = ConfigDict(from_attributes=True)
 
