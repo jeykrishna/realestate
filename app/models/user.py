@@ -7,6 +7,7 @@ import enum
 class UserRole(str, enum.Enum):
     admin = "admin"
     owner = "owner"
+    super_admin = "super_admin"
 
 
 class User(Base):
@@ -18,6 +19,10 @@ class User(Base):
     phone = Column(String(10), nullable=False)
     role = Column(SAEnum(UserRole), nullable=False, default=UserRole.owner)
     property_ids = Column(ARRAY(String), default=[])
+    # Only set for admin/super_admin accounts, which log in with a password
+    # instead of OTP. NULL for owners and for legacy admins that haven't
+    # set a password yet.
+    password_hash = Column(String, nullable=True)
 
     # Relationships
     properties = relationship(

@@ -19,3 +19,6 @@ venv/
 
 # Redis dump file
 dump.rdb
+
+# runtime logs
+*.log

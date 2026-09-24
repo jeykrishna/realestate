@@ -46,13 +46,42 @@ def get_current_user(user: User = Depends(_get_current_user)) -> User:
     return user
 
 
+async def get_optional_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    access_token: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """Like `get_current_user`, but returns None instead of raising when
+    there's no (or an invalid) token — for endpoints that behave differently
+    for logged-in staff vs anonymous/public callers."""
+    token = credentials.credentials if credentials else access_token
+    if not token:
+        return None
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+    jti = payload.get("jti")
+    if jti and await is_blocklisted(jti):
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    return db.query(User).filter(User.id == user_id).first()
+
+
 def require_admin(user: User = Depends(_get_current_user)) -> User:
-    if user.role != UserRole.admin:
+    if user.role not in (UserRole.admin, UserRole.super_admin):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user
 
 
+def require_super_admin(user: User = Depends(_get_current_user)) -> User:
+    if user.role != UserRole.super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    return user
+
+
 def require_owner_or_admin(user: User = Depends(_get_current_user)) -> User:
-    if user.role not in (UserRole.admin, UserRole.owner):
+    if user.role not in (UserRole.admin, UserRole.owner, UserRole.super_admin):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     return user

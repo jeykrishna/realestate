@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # admin is created by seed.py. Prevents anonymous admin self-registration.
     SETUP_TOKEN: str = ""
 
+    # Secret keys required to self-register a privileged account via
+    # POST /auth/register. Change these in production.
+    ADMIN_SECRET_KEY: str = "ADMIN@2024"
+    SUPER_ADMIN_SECRET_KEY: str = "SUPERADMIN@2024"
+
     # Email (AWS SES)
     EMAIL_FROM: str = "noreply@plotbook.in"
     EMAIL_FROM_NAME: str = "PlotBook"

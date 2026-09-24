@@ -16,6 +16,12 @@ class PropertyStatus(str, enum.Enum):
     archived = "archived"
 
 
+class ApprovalStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+
 class Property(Base):
     __tablename__ = "properties"
 
@@ -37,6 +43,10 @@ class Property(Base):
     total_plots = Column(Integer, default=0)
     available_plots = Column(Integer, default=0)
     status = Column(SAEnum(PropertyStatus), default=PropertyStatus.draft, index=True)
+    approval_status = Column(SAEnum(ApprovalStatus), nullable=False, default=ApprovalStatus.approved, index=True)
+    approved_by = Column(String, nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
     owner_id = Column(String, nullable=False, index=True)
     views_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

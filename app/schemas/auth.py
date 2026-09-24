@@ -9,8 +9,18 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
     phone: str = Field(..., description="10-digit mobile number")
-    role: Literal["admin", "owner"] = "owner"
+    role: Literal["admin", "owner", "super_admin"] = "owner"
     property_ids: list[str] = Field(default=[], description="Property IDs assigned to this owner")
+    secret_key: Optional[str] = Field(
+        default=None, description="Required when role is 'admin' or 'super_admin'"
+    )
+    password: Optional[str] = Field(
+        default=None, min_length=8, description="Required when role is 'admin' or 'super_admin'"
+    )
+    otp: Optional[str] = Field(
+        default=None,
+        description="Email verification code from POST /auth/register/send-otp — required when role is 'admin' or 'super_admin'",
+    )
 
     @field_validator("phone")
     @classmethod
@@ -27,6 +37,10 @@ class RegisterResponse(BaseModel):
     success: bool = True
     message: str
     user: "UserOut"
+
+
+class RegisterSendOtpRequest(BaseModel):
+    email: EmailStr
 
 
 # ── OTP ───────────────────────────────────────────────────────────────────────
@@ -77,6 +91,23 @@ class VerifyOTPResponse(BaseModel):
     success: bool = True
     user: UserOut
     token: Optional[str] = None   # JWT token for localStorage (S3/cross-origin clients)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+# ── Password login (admin / super admin) ────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class LoginResponse(BaseModel):
+    """Same shape as VerifyOTPResponse — password login is a drop-in replacement
+    for OTP login on the admin side."""
+    success: bool = True
+    user: UserOut
+    token: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

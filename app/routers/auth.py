@@ -1,6 +1,8 @@
+import logging
 import re
 import secrets
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Request, Header
+from botocore.exceptions import ClientError
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -8,23 +10,26 @@ from typing import Optional
 from app.database import get_db
 from app.models.user import User, UserRole
 from app.schemas.auth import (
-    RegisterRequest, RegisterResponse,
+    RegisterRequest, RegisterResponse, RegisterSendOtpRequest,
     SendOTPRequest, SendOTPResponse,
     VerifyOTPRequest, VerifyOTPResponse, LogoutResponse,
+    LoginRequest, LoginResponse,
     UserOut,
 )
 from app.utils.jwt import create_access_token, decode_access_token, add_to_blocklist
 from app.utils.id_gen import make_id
 from app.utils.limiter import limiter
+from app.utils.security import hash_password, verify_password
 from app.dependencies.auth import get_current_user, require_admin
 from app.services.otp_service import store_otp, verify_otp_code
-from app.services.email_service import send_otp_email
+from app.services.email_service import send_otp_email, send_registration_otp_email
 from app.services.sms_service import send_otp_sms
 from app.config import get_settings
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 _bearer = HTTPBearer(auto_error=False)
 _settings = get_settings()
+_logger = logging.getLogger(__name__)
 
 
 def _normalize_phone(raw: str) -> str:
@@ -40,54 +45,102 @@ def _normalize_phone(raw: str) -> str:
     return digits
 
 
+def _registration_otp_key(email: str) -> str:
+    # Namespaced separately from the login-OTP key so a registration code and
+    # a login code for the same email can never collide.
+    return f"register:{email}"
+
+
+# ── Register: send email verification OTP ────────────────────────────────────
+
+@router.post("/register/send-otp", response_model=SendOTPResponse)
+@limiter.limit(_settings.RATE_LIMIT_OTP)
+async def register_send_otp(
+    request: Request,
+    payload: RegisterSendOtpRequest,
+    db: Session = Depends(get_db),
+):
+    """Send a verification code to the email an admin/super_admin is
+    registering with. Unlike login OTP, this can tell the caller the email is
+    already active — that's expected feedback during signup, not an
+    enumeration risk."""
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing and existing.password_hash:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This email already has an account. Please log in instead.",
+        )
+
+    otp = f"{secrets.randbelow(900000) + 100000}"
+    await store_otp(_registration_otp_key(payload.email), otp)
+    try:
+        await send_registration_otp_email(
+            email=payload.email, otp=otp, name=existing.name if existing else "there"
+        )
+    except ClientError as exc:
+        _logger.error("Failed to send registration OTP to %s: %s", payload.email, exc)
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "MessageRejected":
+            detail = (
+                "We couldn't send a code to this email address. It hasn't been "
+                "verified with our email provider yet — contact your system "
+                "administrator to have it verified, then try again."
+            )
+        else:
+            detail = "Could not send the verification email right now. Please try again shortly."
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
+    return SendOTPResponse(success=True, message="Verification code sent to your email.")
+
+
 # ── Register ──────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
 async def register(
     payload: RegisterRequest,
     db: Session = Depends(get_db),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
-    access_token: Optional[str] = Cookie(default=None),
-    setup_token: Optional[str] = Header(default=None, alias="X-Setup-Token"),
 ):
-    """
-    Create a new admin or owner user.
+    """Create a new user of any role. Open registration — no auth required.
 
-    - If admins already exist → requires a valid admin JWT token.
-    - If NO admin exists yet (first-time setup) → permitted ONLY when SETUP_TOKEN
-      is configured and the caller supplies a matching X-Setup-Token header.
-      With SETUP_TOKEN unset (the default) the first admin must be created via
-      seed.py — anonymous admin self-registration is not possible.
-    """
-    admin_exists = db.query(User).filter(User.role == UserRole.admin).first() is not None
+    Privileged roles (admin, super_admin) require a matching secret key so
+    anyone hitting this endpoint directly can't self-elevate, a verified email
+    (via POST /auth/register/send-otp) so no one can register with an email
+    they don't control, and a password since they log in with one instead of OTP.
 
-    if admin_exists:
-        # Require admin auth for all subsequent registrations
-        token = credentials.credentials if credentials else access_token
-        if not token:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin authentication required")
-        from app.utils.jwt import decode_access_token, is_blocklisted
-        token_payload = decode_access_token(token)
-        if not token_payload:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-        jti = token_payload.get("jti")
-        if jti and await is_blocklisted(jti):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has been revoked")
-        caller_role = token_payload.get("role")
-        if caller_role != "admin":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can register new users")
-    else:
-        # Bootstrap path — locked behind an out-of-band setup token.
-        if not _settings.SETUP_TOKEN or not setup_token or not secrets.compare_digest(
-            setup_token, _settings.SETUP_TOKEN
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Registration is closed.",
+    If the email already belongs to a passwordless admin/super_admin of the
+    same role (a legacy account from before password login existed), this
+    "claims" it — sets its password — instead of rejecting it as a duplicate.
+    """
+    is_privileged = payload.role in ("admin", "super_admin")
+
+    if payload.role == "admin" and payload.secret_key != _settings.ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin secret key")
+    if payload.role == "super_admin" and payload.secret_key != _settings.SUPER_ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid super admin secret key")
+    if is_privileged and not payload.password:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Password is required")
+    if is_privileged and not payload.otp:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Email verification code is required")
+    if is_privileged and not await verify_otp_code(_registration_otp_key(payload.email), payload.otp):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification code")
+
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing:
+        if is_privileged and existing.role == UserRole(payload.role) and not existing.password_hash:
+            existing.password_hash = hash_password(payload.password)
+            db.commit()
+            db.refresh(existing)
+            return RegisterResponse(
+                success=True,
+                message="Password set — you can now log in.",
+                user=UserOut(
+                    id=existing.id,
+                    name=existing.name,
+                    email=existing.email,
+                    phone=existing.phone,
+                    role=existing.role,
+                    property_ids=existing.property_ids or [],
+                ),
             )
-
-    # Check duplicates
-    if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
     if db.query(User).filter(User.phone == payload.phone).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Phone number already registered")
@@ -99,6 +152,7 @@ async def register(
         phone=payload.phone,
         role=UserRole(payload.role),
         property_ids=payload.property_ids,
+        password_hash=hash_password(payload.password) if is_privileged else None,
     )
     db.add(user)
     db.commit()
@@ -112,9 +166,14 @@ async def register(
         role=user.role,
         property_ids=user.property_ids or [],
     )
+    role_label = {
+        UserRole.admin: "Admin",
+        UserRole.super_admin: "Super Admin",
+        UserRole.owner: "Owner",
+    }[user.role]
     return RegisterResponse(
         success=True,
-        message=f"{'Admin' if user.role == UserRole.admin else 'Owner'} account created successfully",
+        message=f"{role_label} account created successfully",
         user=user_out,
     )
 
@@ -137,24 +196,31 @@ async def get_me(current_user: User = Depends(get_current_user)):
 # ── Send OTP ──────────────────────────────────────────────────────────────────
 
 @router.post("/send-otp", response_model=SendOTPResponse)
-@limiter.limit("3/15minutes")
+@limiter.limit(_settings.RATE_LIMIT_OTP)
 async def send_otp(request: Request, payload: SendOTPRequest, db: Session = Depends(get_db)):
     otp = f"{secrets.randbelow(900000) + 100000}"
 
-    # Always return the same response whether or not the account exists, so the
-    # endpoint can't be used to enumerate registered emails / phone numbers.
+    # Always return the same response whether or not the account exists (or the
+    # email/SMS send actually succeeded), so the endpoint can't be used to
+    # enumerate registered emails / phone numbers.
     if payload.email:
         user = db.query(User).filter(User.email == payload.email).first()
         if user:
             await store_otp(payload.email, otp)
-            await send_otp_email(email=payload.email, otp=otp, name=user.name)
+            try:
+                await send_otp_email(email=payload.email, otp=otp, name=user.name)
+            except ClientError as exc:
+                _logger.error("Failed to send login OTP to %s: %s", payload.email, exc)
         return SendOTPResponse(success=True, message="If an account exists, an OTP has been sent.")
     else:
         digits = _normalize_phone(payload.phone)
         user = db.query(User).filter(User.phone == digits).first()
         if user:
             await store_otp(digits, otp)
-            await send_otp_sms(phone="+91" + digits, otp=otp)
+            try:
+                await send_otp_sms(phone="+91" + digits, otp=otp)
+            except Exception as exc:
+                _logger.error("Failed to send login OTP SMS to %s: %s", digits, exc)
         return SendOTPResponse(success=True, message="If an account exists, an OTP has been sent.")
 
 
@@ -194,6 +260,39 @@ async def verify_otp(
         property_ids=user.property_ids or [],
     )
     return VerifyOTPResponse(success=True, user=user_out, token=token)
+
+
+# ── Password login (admin / super admin) ─────────────────────────────────────
+
+@router.post("/login", response_model=LoginResponse, response_model_by_alias=True)
+@limiter.limit(_settings.RATE_LIMIT_AUTH)
+async def login(
+    request: Request,
+    payload: LoginRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.email == payload.email).first()
+
+    # One generic error for "no such user", "no password set" and "wrong
+    # password" alike, so this endpoint can't be used to enumerate accounts.
+    if not user or not user.password_hash or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    if user.role not in (UserRole.admin, UserRole.super_admin):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    token = create_access_token({"sub": user.id, "role": user.role})
+    response.set_cookie(
+        key="access_token", value=token,
+        httponly=True, secure=True, samesite="strict", max_age=86400,
+    )
+
+    user_out = UserOut(
+        id=user.id, name=user.name, email=user.email,
+        phone=user.phone, role=user.role,
+        property_ids=user.property_ids or [],
+    )
+    return LoginResponse(success=True, user=user_out, token=token)
 
 
 # ── Logout ────────────────────────────────────────────────────────────────────

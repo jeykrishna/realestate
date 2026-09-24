@@ -1,0 +1,99 @@
+# Render Blueprint — provisions the API + Postgres + Redis together.
+# Deploy: push this repo to GitHub, then in Render dashboard use
+# "New +" -> "Blueprint" and point it at the repo. Render reads this file
+# and creates all three resources in one go.
+#
+# After the first deploy:
+#   1. Open a shell on the plotbook-api service and run: alembic upgrade head
+#      (only needed once, or after adding preDeployCommand support on your plan)
+#      then: python seed.py
+#   2. Fill in every env var below marked "sync: false" in the Render dashboard
+#      (Render will prompt for these on first deploy).
+#   3. Set ALLOWED_ORIGINS to your real frontend URL once it's deployed.
+
+services:
+  - type: web
+    name: plotbook-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /health
+    # Runs on every deploy before traffic is switched over. Requires a paid
+    # instance type; on the free plan, run `alembic upgrade head` manually
+    # via the Render shell after each deploy instead.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - key: APP_NAME
+        value: PlotBook
+      - key: APP_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        value: https://your-frontend.vercel.app
+      - key: DATABASE_URL
+        fromDatabase:
+          name: plotbook-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: plotbook-redis
+          type: redis
+          property: connectionString
+      - key: OTP_TTL_SECONDS
+        value: "600"
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRE_HOURS
+        value: "24"
+      - key: SETUP_TOKEN
+        sync: false
+      - key: ADMIN_SECRET_KEY
+        sync: false
+      - key: SUPER_ADMIN_SECRET_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: noreply@plotbook.in
+      - key: EMAIL_FROM_NAME
+        value: PlotBook
+      - key: AWS_SES_REGION
+        value: eu-north-1
+      - key: AWS_SNS_REGION
+        value: eu-north-1
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: MEDIA_STORAGE
+        value: s3
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: S3_REGION
+        value: eu-north-1
+      - key: CDN_BASE_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: RATE_LIMIT_PUBLIC
+        value: 60/minute
+      - key: RATE_LIMIT_AUTH
+        value: 10/minute
+      - key: RATE_LIMIT_OTP
+        value: 3/15minutes
+      - key: RATE_LIMIT_DEFAULT
+        value: 240/minute
+
+  - type: redis
+    name: plotbook-redis
+    plan: starter
+    region: frankfurt
+    ipAllowList: []
+
+databases:
+  - name: plotbook-db
+    plan: starter
+    region: frankfurt
+    databaseName: plotbook_db
+    user: plotbook_user

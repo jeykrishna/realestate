@@ -64,6 +64,27 @@ async def send_otp_email(email: str, otp: str, name: str) -> None:
     await _send(to=email, subject="Your PlotBook Login Code", html=html)
 
 
+async def send_registration_otp_email(email: str, otp: str, name: str) -> None:
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:32px;
+                border:1px solid #e5e7eb;border-radius:8px">
+      <h2 style="color:#7c3aed;margin-bottom:8px">Verify your PlotBook account</h2>
+      <p>Hi <strong>{name}</strong>,</p>
+      <p>Use this code to verify your email and finish creating your admin account:</p>
+      <div style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#111827;
+                  background:#f3f4f6;padding:16px 24px;border-radius:6px;
+                  text-align:center;margin:16px 0">{otp}</div>
+      <p style="color:#6b7280;font-size:14px">
+        This code expires in <strong>10 minutes</strong> and can only be used once.<br>
+        If you did not request this, please ignore this email.
+      </p>
+      <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">
+      <p style="color:#9ca3af;font-size:12px">PlotBook — Real Estate Plot Management Platform</p>
+    </div>
+    """
+    await _send(to=email, subject="Verify your email — PlotBook", html=html)
+
+
 async def send_enquiry_notification(enquiry, db) -> None:
     from app.models.property import Property
     from app.models.user import User

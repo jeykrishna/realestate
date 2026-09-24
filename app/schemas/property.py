@@ -178,6 +178,17 @@ class PropertyOut(BaseModel):
     # Owner contact (fetched from users table)
     owner_phone: Optional[str] = Field(default=None, serialization_alias="ownerPhone")
 
+    # Approval workflow
+    approval_status: str = Field(default="approved", serialization_alias="approvalStatus")
+    approved_by: Optional[str] = Field(default=None, serialization_alias="approvedBy")
+    approved_at: Optional[datetime] = Field(default=None, serialization_alias="approvedAt")
+    rejection_reason: Optional[str] = Field(default=None, serialization_alias="rejectionReason")
+
+
+class PropertyRejectRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    reason: Optional[str] = None
+
 
 class PropertyCreateResponse(BaseModel):
     """Slim response returned after POST /properties."""

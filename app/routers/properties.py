@@ -2,18 +2,19 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional
+from datetime import datetime, timezone
 import math
 
 from app.database import get_db
-from app.models.property import Property, PropertyStatus
+from app.models.property import Property, PropertyStatus, ApprovalStatus
 from app.models.plot import Plot, PlotStatus
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.property import (
     PropertyCreate, PropertyUpdate, PropertyOut,
     PropertyListResponse, PropertyDeleteResponse, PropertyCreateResponse,
-    Pagination,
+    PropertyRejectRequest, Pagination,
 )
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_admin, require_super_admin, get_optional_current_user
 from app.utils.id_gen import make_id
 from app.utils.slug import make_slug
 
@@ -77,6 +78,10 @@ def _property_to_out(prop: Property, db: Session) -> PropertyOut:
         corner_plot=prop.corner_plot,
         price_per_sqft=prop.price_per_sqft,
         owner_phone=owner_phone,
+        approval_status=prop.approval_status.value,
+        approved_by=prop.approved_by,
+        approved_at=prop.approved_at,
+        rejection_reason=prop.rejection_reason,
     )
 
 
@@ -98,6 +103,9 @@ def list_properties(
     city: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     status: Optional[str] = Query(None, description="active|draft|archived"),
+    approval_status: Optional[str] = Query(
+        None, alias="approvalStatus", description="pending|approved|rejected (staff only)"
+    ),
     search: Optional[str] = Query(None, description="Search in name/description"),
     min_price: Optional[int] = Query(None, alias="minPrice"),
     max_price: Optional[int] = Query(None, alias="maxPrice"),
@@ -105,13 +113,27 @@ def list_properties(
     page: int = Query(1, ge=1),
     limit: int = Query(12, ge=1, le=100),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ):
+    is_staff = bool(current_user and current_user.role in (UserRole.admin, UserRole.super_admin))
+
     q = db.query(Property)
 
-    if status:
-        q = q.filter(Property.status == status)
+    if is_staff:
+        # Staff (admin/super admin) manage their own dashboard — show every
+        # status/approval state unless they explicitly filter.
+        if status:
+            q = q.filter(Property.status == status)
+        if approval_status:
+            q = q.filter(Property.approval_status == approval_status)
+        if current_user.role == UserRole.admin:
+            # Regular admins only see properties they created themselves.
+            # Super admins keep the full, unfiltered view.
+            q = q.filter(Property.owner_id == current_user.id)
     else:
-        q = q.filter(Property.status == PropertyStatus.active)
+        # Public storefront never shows drafts, archived, or not-yet-approved listings.
+        q = q.filter(Property.status == (status or PropertyStatus.active))
+        q = q.filter(Property.approval_status == ApprovalStatus.approved)
 
     if city:
         q = q.filter(func.lower(Property.city) == city.lower())
@@ -162,7 +184,10 @@ def search_properties(
     limit: int = Query(12, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Property).filter(Property.status == PropertyStatus.active)
+    query = db.query(Property).filter(
+        Property.status == PropertyStatus.active,
+        Property.approval_status == ApprovalStatus.approved,
+    )
 
     if city:
         query = query.filter(func.lower(Property.city) == city.lower())
@@ -199,7 +224,11 @@ def search_properties(
 # ── GET /properties/:slug ─────────────────────────────────────────────────────
 
 @router.get("/{slug}", response_model=PropertyOut, response_model_by_alias=True)
-def get_property(slug: str, db: Session = Depends(get_db)):
+def get_property(
+    slug: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
     prop = (
         db.query(Property)
         .filter((Property.slug == slug) | (Property.id == slug))
@@ -207,6 +236,12 @@ def get_property(slug: str, db: Session = Depends(get_db)):
     )
     if not prop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
+    is_staff = bool(current_user and current_user.role in (UserRole.admin, UserRole.super_admin))
+    is_owner = bool(current_user and current_user.id == prop.owner_id)
+    if not is_staff and not is_owner and prop.approval_status != ApprovalStatus.approved:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
     return _property_to_out(prop, db)
 
 
@@ -216,7 +251,7 @@ def get_property(slug: str, db: Session = Depends(get_db)):
 def create_property(
     payload: PropertyCreate,
     db: Session = Depends(get_db),
-    current_user: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     slug = make_slug(payload.name)
     # Ensure slug is unique
@@ -227,6 +262,12 @@ def create_property(
         counter += 1
 
     location_dict = payload.location.model_dump() if payload.location else None
+
+    # Super admins publish straight through; regular admins queue for approval.
+    is_super_admin = current_user.role == UserRole.super_admin
+    approval_status = ApprovalStatus.approved if is_super_admin else ApprovalStatus.pending
+    approved_by = current_user.id if is_super_admin else None
+    approved_at = datetime.now(timezone.utc) if is_super_admin else None
 
     prop = Property(
         id=make_id("prop"),
@@ -241,6 +282,9 @@ def create_property(
         video_url=payload.video_url,
         map_embed_url=payload.map_embed_url,
         status=payload.status,
+        approval_status=approval_status,
+        approved_by=approved_by,
+        approved_at=approved_at,
         owner_id=current_user.id,
         plot_area_sqft=payload.plot_area_sqft,
         dimensions_label=payload.dimensions,
@@ -269,6 +313,7 @@ def create_property(
             "viewsCount": prop.views_count or 0,
             "totalPlots": prop.total_plots or 0,
             "availablePlots": prop.available_plots or 0,
+            "approvalStatus": prop.approval_status.value,
         },
     }
 
@@ -280,11 +325,13 @@ def update_property(
     property_id: str,
     payload: PropertyUpdate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     prop = db.query(Property).filter(Property.id == property_id).first()
     if not prop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+    if current_user.role == UserRole.admin and prop.owner_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit properties you created")
 
     update_data = payload.model_dump(exclude_unset=True)
 
@@ -319,12 +366,57 @@ def update_property(
 def delete_property(
     property_id: str,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
+):
+    prop = db.query(Property).filter(Property.id == property_id).first()
+    if not prop:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+    if current_user.role == UserRole.admin and prop.owner_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete properties you created")
+
+    prop.status = PropertyStatus.archived
+    db.commit()
+    return PropertyDeleteResponse(success=True)
+
+
+# ── PATCH /properties/:id/approve ─────────────────────────────────────────────
+
+@router.patch("/{property_id}/approve", response_model=PropertyOut, response_model_by_alias=True)
+def approve_property(
+    property_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
 ):
     prop = db.query(Property).filter(Property.id == property_id).first()
     if not prop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
 
-    prop.status = PropertyStatus.archived
+    prop.approval_status = ApprovalStatus.approved
+    prop.approved_by = current_user.id
+    prop.approved_at = datetime.now(timezone.utc)
+    prop.rejection_reason = None
     db.commit()
-    return PropertyDeleteResponse(success=True)
+    db.refresh(prop)
+    return _property_to_out(prop, db)
+
+
+# ── PATCH /properties/:id/reject ──────────────────────────────────────────────
+
+@router.patch("/{property_id}/reject", response_model=PropertyOut, response_model_by_alias=True)
+def reject_property(
+    property_id: str,
+    payload: PropertyRejectRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    prop = db.query(Property).filter(Property.id == property_id).first()
+    if not prop:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
+    prop.approval_status = ApprovalStatus.rejected
+    prop.approved_by = current_user.id
+    prop.approved_at = datetime.now(timezone.utc)
+    prop.rejection_reason = payload.reason
+    db.commit()
+    db.refresh(prop)
+    return _property_to_out(prop, db)

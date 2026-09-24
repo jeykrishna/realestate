@@ -22,6 +22,11 @@ from app.services.email_service import send_enquiry_notification
 router = APIRouter(prefix="/enquiries", tags=["Enquiries"])
 
 
+def _owned_property_ids(db: Session, admin_id: str) -> list[str]:
+    """Property IDs created by a given admin, for scoping their enquiry view."""
+    return [pid for (pid,) in db.query(Property.id).filter(Property.owner_id == admin_id).all()]
+
+
 def _enquiry_to_out(e: Enquiry, db: Session) -> EnquiryOut:
     prop = db.query(Property).filter(Property.id == e.property_id).first()
     plot = db.query(Plot).filter(Plot.id == e.plot_id).first() if e.plot_id else None
@@ -80,6 +85,10 @@ def export_enquiries(
     if current_user.role == UserRole.owner:
         if propertyId not in (current_user.property_ids or []):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your property")
+    elif current_user.role == UserRole.admin:
+        prop = db.query(Property).filter(Property.id == propertyId).first()
+        if not prop or prop.owner_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your property")
 
     enquiries = db.query(Enquiry).filter(Enquiry.property_id == propertyId).all()
 
@@ -117,6 +126,10 @@ def list_enquiries(
     if current_user.role == UserRole.owner:
         owner_property_ids = current_user.property_ids or []
         q = q.filter(Enquiry.property_id.in_(owner_property_ids))
+    elif current_user.role == UserRole.admin:
+        # Regular admins only see enquiries for properties they created.
+        # Super admins keep the full, unfiltered view.
+        q = q.filter(Enquiry.property_id.in_(_owned_property_ids(db, current_user.id)))
 
     if propertyId:
         q = q.filter(Enquiry.property_id == propertyId)
@@ -147,6 +160,10 @@ def update_enquiry_status(
 
     if current_user.role == UserRole.owner:
         if enquiry.property_id not in (current_user.property_ids or []):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your enquiry")
+    elif current_user.role == UserRole.admin:
+        prop = db.query(Property).filter(Property.id == enquiry.property_id).first()
+        if not prop or prop.owner_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your enquiry")
 
     enquiry.status = payload.status
