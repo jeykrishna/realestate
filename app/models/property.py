@@ -65,6 +65,10 @@ class Property(Base):
     price_per_sqft = Column(Integer, nullable=True)
     starting_price = Column(BigInteger, nullable=True)
 
+    # Per-property contact number shown on the public listing. Overrides the
+    # owning user's phone when set (falls back to owner.phone otherwise).
+    contact_phone = Column(String(15), nullable=True)
+
     # Relationships
     owner = relationship(
         "User",

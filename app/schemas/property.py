@@ -74,6 +74,7 @@ class PropertyCreate(BaseModel):
     corner_plot: Optional[bool] = Field(default=None, validation_alias="cornerPlot")
     price_per_sqft: Optional[int] = Field(default=None, validation_alias="pricePerSqft")
     starting_price: Optional[int] = Field(default=None, validation_alias="startingPrice")
+    contact_phone: Optional[str] = Field(default=None, validation_alias="contactPhone")
 
     @model_validator(mode="after")
     def resolve_location(self) -> "PropertyCreate":
@@ -112,6 +113,7 @@ class PropertyUpdate(BaseModel):
     corner_plot: Optional[bool] = Field(default=None, validation_alias="cornerPlot")
     price_per_sqft: Optional[int] = Field(default=None, validation_alias="pricePerSqft")
     starting_price: Optional[int] = Field(default=None, validation_alias="startingPrice")
+    contact_phone: Optional[str] = Field(default=None, validation_alias="contactPhone")
 
     hero_image: Optional[str] = Field(default=None, validation_alias="heroImage")
     images: Optional[list[str]] = None

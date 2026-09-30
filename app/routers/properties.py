@@ -26,9 +26,9 @@ def _property_to_out(prop: Property, db: Session) -> PropertyOut:
     total_plots = len(plots)
     available_plots = sum(1 for p in plots if p.status == PlotStatus.available)
 
-    # Fetch owner phone from users table
+    # Property-specific contact number wins; otherwise fall back to the owner's phone.
     owner = db.query(User).filter(User.id == prop.owner_id).first()
-    owner_phone = owner.phone if owner else None
+    owner_phone = prop.contact_phone or (owner.phone if owner else None)
 
     # Flatten location
     lat = lng = None
@@ -298,6 +298,7 @@ def create_property(
         corner_plot=payload.corner_plot,
         price_per_sqft=payload.price_per_sqft,
         starting_price=payload.starting_price,
+        contact_phone=payload.contact_phone,
     )
     db.add(prop)
     db.commit()
